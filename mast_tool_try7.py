@@ -1,24 +1,10 @@
 
 """
-MDM pipeline data processing
-notes
-- this script assumes the reference file contains:
-      Date/time [UTC]
-      Speed_100m [m/s]
-      Temperature_2m [degrees C]
-- mast files contain Year/Month/Day and Hour/Minute.
-- files generally have a naming convention of (number)_target for the masts and reference_copy for the reference
-- csv format
-- will need to manually input the reference time bounds (which get calculated in stage 1)
-- wind columns:
-      Speed 110m syn [m/s]
-      Speed 50m syn TI [%]
-- temperature columns::
-      Temperature 50m syn [°C]
-- density columns:
-      Density 50m [kg/m³]
-
-final output is called final_timeseries_(number).csv
+notes: this is the code that works with baronwind format
+will need the reference dataset to be renamed to reference_copy and in CSV format
+headers are hardcoded in here to match the reference dataset
+outputs are stored in a folder called pipeline_outputs which gets generated when run
+masttool.env
 """
 
 #libraries and packages etc
@@ -84,7 +70,7 @@ primary_speed_height = 110
 wind_ratio_cap_min = 0.7
 wind_ratio_cap_max = 1.3
 
-#target window is inferred from the mast input files when not explicitly provided
+#target window is inferred from the mast input files
 default_target_start = None
 default_target_end = None
 
@@ -178,11 +164,7 @@ def normalize_month(m):
         pass
     return None
 
-
 def infer_target_window_from_masts(masts):
-    if not masts:
-        raise ValueError("No mast files were provided")
-
     bounds = []
     for mast in masts:
         df = load_mast_input(mast.raw_path)
@@ -194,9 +176,6 @@ def infer_target_window_from_masts(masts):
         if timestamps.empty:
             continue
         bounds.append((timestamps.min(), timestamps.max()))
-
-    if not bounds:
-        raise ValueError("No usable timestamps found in input mast files")
 
     start = max(bound[0] for bound in bounds)
     end = min(bound[1] for bound in bounds)
@@ -364,7 +343,6 @@ def discover_temperature_column(df, height):
         c_lower = c.lower()
         if f"{height}m" in c_lower or f"{height} m" in c_lower:
             return c
-
     return None
 
 def parse_ratio_list(value):
@@ -394,7 +372,6 @@ def read_input_header_block(path):
             f"No 'Year,Month,Day,Hour,Minute' header row found in {path}"
         )
     return meta_lines, header_line
-
 
 def load_mast_input(path):
 #read inputs
@@ -788,35 +765,17 @@ def read_target_for_temperature(path, heights):
     return df_target
 
 def apply_temperature_scaling(df_target, ratio_df, heights, full_temp_mean_k_by_height=None):
-    """
-    Apply monthly temperature ratios to the already-trimmed best-window target data,
-    then apply a final/global restoration factor so each height's corrected mean
-    matches the full input target mean captured before trimming.
-
-    This implements spec steps 4, 6, and 7 for temperature:
-      - full_temp_mean_k_by_height is calculated from the raw/full target file
-      - monthly ratios are applied to the trimmed best-window target
-      - corrected temperature is restored to the full-target average
-    """
+#temp scaling, then back down to mean
     ratio_map = dict(zip(ratio_df["Month"].astype(int), ratio_df["Ratio"].astype(float)))
     months = df_target["Month"].apply(normalize_month)
 
-    if months.isna().any():
-        raise ValueError("Could not normalize one or more target months for temperature scaling")
-
     monthly_scale = months.map(ratio_map)
-    if monthly_scale.isna().any():
-        missing_months = sorted(months[monthly_scale.isna()].unique())
-        raise ValueError(f"Missing temperature scaling ratios for months {missing_months}")
 
     df_target = df_target.copy()
     df_target["temperature_applied_ratio"] = monthly_scale
 
     for h in heights:
         source_k_col = f"Temperature_k_{h}"
-        if source_k_col not in df_target.columns:
-            raise KeyError(f"Missing {source_k_col}; cannot temperature-scale {h}m")
-
         original_temp_k = df_target[source_k_col].astype(float)
         scaled_temp_k = original_temp_k * monthly_scale
 
@@ -829,11 +788,11 @@ def apply_temperature_scaling(df_target, ratio_df, heights, full_temp_mean_k_by_
         global_factor = desired_mean_k / scaled_mean_k if scaled_mean_k and not pd.isna(scaled_mean_k) else 1.0
         corrected_temp_k = scaled_temp_k * global_factor
 
-        # Monthly-scaled only values, kept for diagnostics/traceability.
+        #scaled temps
         df_target[f"scaled_temp_{h}K"] = scaled_temp_k
         df_target[f"scaled_temp_{h}C"] = scaled_temp_k - 273.15
 
-        # Final restored values used downstream.
+        #restored to mean
         df_target[f"corrected_temp_{h}K"] = corrected_temp_k
         df_target[f"corrected_temp_{h}C"] = corrected_temp_k - 273.15
         df_target[f"temperature_final_scale_factor_{h}"] = global_factor
@@ -845,11 +804,10 @@ def apply_temperature_scaling(df_target, ratio_df, heights, full_temp_mean_k_by_
 def run_stage4(config, targets=None, target_glob=None):
     ensure_output_dir(config)
     masts = discover_masts(config, targets=targets, target_glob=target_glob)
-    #read stage3 window
 
+    #read stage3 window
     window_df = pd.read_csv(config.path("window_diagnostics.csv"))
     best = window_df.sort_values("Rank").iloc[0]
-
     best_start = pd.Timestamp(best["Start"])
     best_end = pd.Timestamp(best["End"])
 
@@ -868,9 +826,6 @@ def run_stage4(config, targets=None, target_glob=None):
         full_temp_mean_k_by_height = {}
         for h in config.heights:
             source_col = discover_temperature_column(df_full, h)
-            if source_col is None:
-                temp_cols = [c for c in df_full.columns if "temp" in c.lower() or "temperature" in c.lower()]
-                raise KeyError(f"Missing full-input temperature column for {h}m in {mast.raw_path}. Available temperature-like columns: {temp_cols}")
             full_temp_mean_k_by_height[h] = float(df_full[source_col].astype(float).mean() + 273.15)
 
         #stage 3 best window applied
@@ -937,14 +892,12 @@ def compute_mean_elevation(all_dfs, heights):
     return pd.DataFrame(records)
 
 def recompute_density(df, heights, avg_elevation, P0=101325, R=287.05, g=-9.80665):
-#elevation is back-calculated from the pre-scaled temperature, but density must
-#reflect the corrected temperature at that fixed elevation
+#elevation is back-calculated from the pre-scaled temperature
+#recomputes density
     df = df.copy()
 
     for h in heights:
         temp_col = f"corrected_temp_{h}K"
-        if temp_col not in df.columns:
-            raise KeyError(f"Missing {temp_col}; run stage 4 (temperature scaling) before stage 5")
         new_density_col = f"recomputed_density_{h}m"
 
         z = avg_elevation[h]
@@ -1217,7 +1170,7 @@ def write_final_timeseries(df_merged, mast_id, config, raw_input_path):
         m = re.fullmatch(r"Speed (\d+)m syn TI \[%\]", col)
         if m and f"new_TI_{m.group(1)}m" in df.columns:
             return df[f"new_TI_{m.group(1)}m"]
-        # Density: prefer recomputed density from elevation outputs, then original density
+        # density
         m = re.fullmatch(r"Density (\d+)m \[kg/m³\]", col)
         if m:
             h = m.group(1)
@@ -1228,7 +1181,7 @@ def write_final_timeseries(df_merged, mast_id, config, raw_input_path):
             if density_col in df.columns:
                 return df[density_col]
 
-        # everything else (Direction, Year..Minute, L [m], etc.) passes through
+        # everything else
         return df[col] if col in df.columns else pd.Series([""] * len(df))
 
     out = pd.DataFrame({col: resolve(col) for col in out_columns})
@@ -1409,13 +1362,11 @@ def parse_args():
     parser.add_argument(
         "--target-start",
         default=None,
-        help="Optional explicit target window start; defaults to the overlap inferred from the mast inputs.",
     )
 
     parser.add_argument(
         "--target-end",
         default=None,
-        help="Optional explicit target window end; defaults to the overlap inferred from the mast inputs.",
     )
 
     parser.add_argument(
@@ -1434,9 +1385,6 @@ def parse_args():
     parser.add_argument(
         "--write-diagnostics",
         action="store_true",
-        help="also write the optional diagnostic/redundant CSVs "
-             "(scaling ratios, per-stage diagnostics, density subset, "
-             "elevation summary, full merged frame). Off by default.",
     )
     return parser.parse_args()
 
