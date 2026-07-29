@@ -34,9 +34,9 @@ output_dir_default = "pipeline_outputs"
 reference_csv_default = "reference_copy.csv"
 
 #assign values
-wind_reference_col = "Speed_100m [m/s]"
-temp_reference_col = "Temperature_2m [degrees C]"
-reference_time_col = "Date/time [UTC]"
+wind_reference_col = "100.0 WS [m/s]"
+temp_reference_col = "2.0 TEMP [°C]"
+reference_time_col = "Timestamp (UTC-06)"
 
 mast_id_regexes = [
     r"target[_-]?(\d{3,5})",
@@ -347,14 +347,14 @@ def load_reference(reference_csv):
 def discover_speed_columns(df):
     speed_columns = []
     for column_name in df.columns:
-        match = re.fullmatch(r"Speed (\d+)m syn \[m/s\]", column_name)
+        match = re.fullmatch(r"Spd (\d+)m \[m/s\]", column_name)
         if match:
             speed_columns.append((int(match.group(1)), column_name))
     speed_columns.sort(key=lambda item: item[0])
     return speed_columns
 
 def discover_temperature_column(df, height):
-    expected = f"Temperature {height}m syn [°C]"
+    expected = f"Tmp {height}m [°C]"
     if expected in df.columns:
         return expected
 
@@ -613,7 +613,7 @@ def mad_score(applied_ratios):
 
 def run_stage3(config, targets=None, target_glob=None, speed_col=None):
     ensure_output_dir(config)
-    speed_col = speed_col or f"Speed {config.primary_speed_height}m syn [m/s]"
+    speed_col = speed_col or f"Spd {config.primary_speed_height}m [m/s]"
     # find raw mast files 
     masts = discover_masts(config, targets=targets, target_glob=target_glob)
     # load the long-term reference 
@@ -695,7 +695,7 @@ def run_stage3(config, targets=None, target_glob=None, speed_col=None):
 
         full_speed_columns = discover_speed_columns(df_full)
         if not full_speed_columns:
-            raise ValueError(f"{mast.mast_id}: no Speed {{height}}m syn [m/s] columns found")
+            raise ValueError(f"{mast.mast_id}: no Spd {{height}}m [m/s] columns found")
         full_target_mean = {
             height: df_full[col].astype(float).mean()
             for height, col in full_speed_columns
@@ -719,7 +719,7 @@ def run_stage3(config, targets=None, target_glob=None, speed_col=None):
         df_target["best_window_applied_ratio"] = monthly_scale
         speed_columns = discover_speed_columns(df_target)
         if not speed_columns:
-            raise ValueError(f"{mast.mast_id}: no Speed {{height}}m syn [m/s] columns found")
+            raise ValueError(f"{mast.mast_id}: no Spd {{height}}m [m/s] columns found")
 
         for height, height_speed_col in speed_columns:
             original_speed = df_target[height_speed_col].astype(float)
@@ -1005,8 +1005,8 @@ def find_corrected_speed_column(df, height=None):
 def compute_ti_columns(df, heights):
     df = df.copy()
     for h in heights:
-        speed_col = f"Speed {h}m syn [m/s]"
-        ti_pct_col = f"Speed {h}m syn TI [%]"
+        speed_col = f"Spd {h}m [m/s]"
+        ti_pct_col = f"Spd {h}m TI [%]"
         std_dev_col = f"stddev_{h}m"
         new_ti_col = f"new_TI_{h}m"
 
@@ -1171,13 +1171,13 @@ def write_final_timeseries(df_merged, mast_id, config, raw_input_path):
     #replace w calculated values
     def resolve(col):
         # scaled/corrected wind speed
-        m = re.fullmatch(r"Speed (\d+)m syn \[m/s\]", col)
+        m = re.fullmatch(r"Spd (\d+)m \[m/s\]", col)
         if m:
             src = find_corrected_speed_column(df, height=int(m.group(1)))
             if src and src in df.columns:
                 return df[src]
      
-        m = re.fullmatch(r"Temperature (\d+)m syn \[°C\]", col)
+        m = re.fullmatch(r"Temp (\d+)m \[°C\]", col)
         if m:
             h = m.group(1)
             corrected_col = find_corrected_temperature_column(df, h)
@@ -1187,7 +1187,7 @@ def write_final_timeseries(df_merged, mast_id, config, raw_input_path):
                     return series - 273.15
                 return series
         # recomputed turbulence intensity
-        m = re.fullmatch(r"Speed (\d+)m syn TI \[%\]", col)
+        m = re.fullmatch(r"Spd (\d+)m TI \[%\]", col)
         if m and f"new_TI_{m.group(1)}m" in df.columns:
             return df[f"new_TI_{m.group(1)}m"]
         # density
@@ -1244,7 +1244,7 @@ def run_stage8(config, targets=None, target_glob=None):
         df_original = load_mast_input(mast.raw_path)
         df_corrected = pd.read_csv(mast.best_window_path)
 
-        speed_col_original = f"Speed {config.primary_speed_height}m syn [m/s]"
+        speed_col_original = f"Spd {config.primary_speed_height}m [m/s]"
         speed_col_corrected = "best_window_corrected_speed"
 
         df_original["Month_int"] = df_original["Month"].astype(int)
